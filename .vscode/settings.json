@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "*.css": "tailwindcss",
+        "array": "cpp",
+        "istream": "cpp",
+        "locale": "cpp",
+        "memory": "cpp",
+        "tuple": "cpp",
+        "variant": "cpp",
+        "atomic": "cpp"
+    }
+}
