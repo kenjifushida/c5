@@ -8,5 +8,6 @@
         "tuple": "cpp",
         "variant": "cpp",
         "atomic": "cpp"
-    }
+    },
+    "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools"
 }
