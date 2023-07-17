@@ -8,14 +8,16 @@
 #include <sys/time.h>
 
 #define DbSize 10000
-#define thread_num 4
-
+#define thread_num 64
+#define readers_num 30
+#define workers_num 32
 #define tx_size 16
+
 int max_tx = 1000;
 int max_c = 0;
 std::atomic<int> Counter(0);
 std::atomic<int> n(0);
-int ci[thread_num-3];
+int ci[workers_num];
 
 struct timeval
 cur_time(void)
@@ -453,7 +455,7 @@ snapshotter(void *arg) {
 	// advance c and n by taking the minimum ci from each of the worker threads
 	while(Counter.load() < max_c - 1) {
 		int newN = ci[0];
-		for(int i = 0; i < thread_num-3; i++) {
+		for(int i = 0; i < workers_num; i++) {
 			newN = std::min(newN, ci[i]);
 		}
 		Counter.store(n);
@@ -594,27 +596,18 @@ main(int argc, char *argv[])
 	// 	pthread_create(&thread[i], NULL, worker, (void *)NULL);
 	// }
 
-	pthread_create(&thread[0], NULL, scheduler, (void*)&logSegments);
-	pthread_create(&thread[1], NULL, worker, (void*)&ci[0]);
-	pthread_create(&thread[2], NULL, snapshotter, (void*)NULL);
-	pthread_create(&thread[3], NULL, reader, (void *)NULL);
+	for(int i = 0; i < workers_num; i++) {
+		pthread_create(&thread[i], NULL, worker, (void*)&ci[i]);
+	}
+	for(int i = 0; i < readers_num; i++) {
+		pthread_create(&thread[workers_num+i], NULL, reader, (void *)NULL);
+	}
+	pthread_create(&thread[thread_num-1], NULL, scheduler, (void*)&logSegments);
+	pthread_create(&thread[thread_num-2], NULL, snapshotter, (void*)NULL);
 
-	// for(int i = 0; i < 2; i++) {
-	// 	pthread_join(thread[i], NULL);
-	// }
-
-	pthread_join(thread[0], NULL);
-	cout<< "scheduler finished" << endl;
-	pthread_join(thread[1], NULL);
-	cout<< "worker finished" << endl;
-	pthread_join(thread[2], NULL);
-	cout<< "snapshotter finished" << endl;
-	pthread_join(thread[3], NULL);
-	cout<< "reader finished" << endl;
-
-	// scheduler((void *)&log);
-	// worker((void *)&ci[0]);
-
+	for(int i = 0; i < thread_num; i++) {
+		pthread_join(thread[i], NULL);
+	}
 	// printf("Successful transactions: %u \n", Counter.load());
 	// end = cur_time();
 
