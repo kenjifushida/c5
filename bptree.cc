@@ -597,7 +597,7 @@ main(int argc, char *argv[])
 	pthread_create(&thread[0], NULL, scheduler, (void*)&logSegments);
 	pthread_create(&thread[1], NULL, worker, (void*)&ci[0]);
 	pthread_create(&thread[2], NULL, snapshotter, (void*)NULL);
-	// pthread_create(&thread[4], NULL, reader, (void *)NULL);
+	pthread_create(&thread[3], NULL, reader, (void *)NULL);
 
 	// for(int i = 0; i < 2; i++) {
 	// 	pthread_join(thread[i], NULL);
@@ -609,6 +609,8 @@ main(int argc, char *argv[])
 	cout<< "worker finished" << endl;
 	pthread_join(thread[2], NULL);
 	cout<< "snapshotter finished" << endl;
+	pthread_join(thread[3], NULL);
+	cout<< "reader finished" << endl;
 
 	// scheduler((void *)&log);
 	// worker((void *)&ci[0]);
