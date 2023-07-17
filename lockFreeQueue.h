@@ -7,7 +7,7 @@
 
 typedef struct qnode {
 	std::atomic<struct qnode *>next;
-	void *content;
+	int value;
 } QueueNode;
 
 
@@ -23,10 +23,12 @@ public:
 		tail.store(node);
 	}
 
-	void enq(QueueNode *node) {
+	void enq(int val) {
+		QueueNode *node = (QueueNode *)malloc(sizeof(QueueNode));
+		node->value = val;
 		while(true) {
-			auto *last = tail.load();
-			auto *next = last->next.load();
+			QueueNode *last = tail.load();
+			QueueNode *next = last->next.load();
 			if(last == tail.load()) {
 				if(next == NULL) {
 					if(last->next.compare_exchange_strong(next, node)) {
@@ -41,20 +43,21 @@ public:
 		}
 	}
 
-	QueueNode *deq() {
+	int deq() {
 		while(true) {
-			auto *first = head.load();
-			auto *last = tail.load();
-			auto *next = first->next.load();
+			QueueNode *first = head.load();
+			QueueNode *last = tail.load();
+			QueueNode *next = first->next.load();
 			if(first == head.load()) {
 				if(first == last) {
 					if(next == NULL) {
-						return NULL;
+						return -1;
 					}
 					tail.compare_exchange_strong(last, next);
 				} else {
+					int value = next->value;
 					if(head.compare_exchange_strong(first, next)) {
-						return next;
+						return value;
 					}
 				}
 			}
@@ -63,9 +66,9 @@ public:
 
 	bool isEmpty() {
 		// check if queue is empty
-        auto *first = head.load();
-        auto *last = tail.load();
-        auto *next = first->next.load();
+        QueueNode *first = head.load();
+        QueueNode *last = tail.load();
+        QueueNode *next = first->next.load();
 		if(first == last && next == NULL) {
 			return true;
 		} else {
@@ -74,5 +77,5 @@ public:
 	}
 };
 
-LockFreeQueue *schedulerQueue = new LockFreeQueue();
+LockFreeQueue *segmentQueue = new LockFreeQueue();
 LockFreeQueue *readOnlyQueue = new LockFreeQueue();

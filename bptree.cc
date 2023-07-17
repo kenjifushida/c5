@@ -2,11 +2,12 @@
 #include "lockFreeQueue.h"
 #include <pthread.h>
 #include <vector>
+#include <queue>
 #include <unordered_map>
 #include <cstdlib>
 #include <sys/time.h>
 
-#define DbSize 1000000
+#define DbSize 10000
 #define thread_num 4
 
 #define tx_size 16
@@ -28,82 +29,21 @@ typedef struct record {
 	int key;
 	int newValue;
 	std::atomic<int> timestamp;
+	std::atomic<int> prev_timestamp;
 } LogRecord;
 
-// typedef struct qnode {
-// 	std::atomic<struct qnode *>next;
-// 	void *content;
-// } QueueNode;
+typedef struct segment {
+	std::atomic<bool> preprocessed;
+	vector<LogRecord *> records;
+} LogSegment;
 
 typedef struct transaction {
 	int readSet[tx_size];
 	int ts;
 } Transaction;
 
-
-// class LockFreeQueue {
-// public:
-// 	std::atomic<QueueNode *> head;
-// 	std::atomic<QueueNode *> tail;
-// 	std::atomic<QueueNode *> next;
-// 	std::atomic<uint> empty;
-// 	LockFreeQueue() {
-// 		QueueNode *node = (QueueNode *)malloc(sizeof(QueueNode));
-// 		node->next.store(NULL);
-// 		head.store(node);
-// 		tail.store(node);
-// 	}
-
-// 	void enq(QueueNode *node) {
-// 		while(true) {
-// 			auto *last = tail.load();
-// 			auto *next = last->next.load();
-// 			if(last == tail.load()) {
-// 				if(next == NULL) {
-// 					if(last->next.compare_exchange_strong(next, node)) {
-// 						tail.compare_exchange_strong(last, node);
-// 						return;
-// 					}
-// 				}
-// 				else {
-// 					tail.compare_exchange_strong(last, next);
-// 				}
-// 			}
-// 		}
-// 	}
-
-// 	QueueNode *deq() {
-// 		while(true) {
-// 			auto *first = head.load();
-// 			auto *last = tail.load();
-// 			auto *next = first->next.load();
-// 			if(first == head.load()) {
-// 				if(first == last) {
-// 					if(next == NULL) {
-// 						return NULL;
-// 					}
-// 					tail.compare_exchange_strong(last, next);
-// 				} else {
-// 					if(head.compare_exchange_strong(first, next)) {
-// 						return next;
-// 					}
-// 				}
-// 			}
-// 		}
-// 	}
-
-// 	bool isEmpty() {
-// 		// check if queue is empty
-// 		if(tail.load() == NULL) {
-// 			return true;
-// 		} else {
-// 			return false;
-// 		}
-// 	}
-// };
-
-// LockFreeQueue *schedulerQueue = new LockFreeQueue();
-// LockFreeQueue *readOnlyQueue = new LockFreeQueue();
+vector<LogSegment *> logSegments(400, NULL);
+vector<Transaction *> readOnlyTransactions(1000, NULL);
 
 void
 print_tree_core(NODE *n)
@@ -451,30 +391,28 @@ search(NODE *node, int key, int txTimestamp)
 }
 
 void
-update(NODE *node, int key, int newVal, int ts)
+update(NODE *node, queue<LogRecord *> &deferQueue, LogRecord *updateRecord)
 {
 	int i;
-	NODE *leaf = find_leaf(node, key);
+	NODE *leaf = find_leaf(node, updateRecord->key);
 	for(i=0; i<leaf->nkey; i++) {
-		if(leaf->key[i] == key) {
+		if(leaf->key[i] == updateRecord->key) {
 			DATA *record = (DATA *)leaf->chi[i];
 			DATA *newVersion = (DATA *)malloc(sizeof(DATA));
 			newVersion->next = record;
-			newVersion->key = key;
-			newVersion->val = newVal;
-			newVersion->timestamp = ts;
-			while(true) {
-				if(pthread_rwlock_trywrlock(&(record->rwlock))==0) {
-					leaf->chi[i] = (NODE *)newVersion;
-					if(pthread_rwlock_unlock(&(record->rwlock))!=0) ERR;
-					return;
-				}
-				usleep(rand()%1000);
+			newVersion->key = updateRecord->key;
+			newVersion->val = updateRecord->newValue;
+			newVersion->timestamp = updateRecord->timestamp;
+			pthread_rwlock_init(&newVersion->rwlock, NULL);
+			if(record->timestamp == updateRecord->prev_timestamp) {
+				cout << "record updated = " << "key: " << newVersion->key << "neWVal: " << newVersion->val << "ts: " << newVersion->timestamp << endl;
+				leaf->chi[i] = (NODE *)newVersion;
+				return;
 			}
-			throw (-1);
 		}
 	}
-	printf("Value couldn't be updated\n");
+	cout << "record deferred = " << "key: " << updateRecord->key << "neWVal: " << updateRecord->newValue << "ts: " << updateRecord->timestamp << endl;
+	deferQueue.push(updateRecord);
 	return;
 }
 
@@ -496,32 +434,16 @@ scheduler(void *arg) {
 		2. Enqueue each write to the respective row-queue
 		3. Enqueue row-queue to scheduler queue
 	*/
-	unordered_map<int, LockFreeQueue *> rowQueues;
-	vector<LogRecord *> logRecords = *(vector<LogRecord *> *)arg;
-	for(int i = 0; i < logRecords.size(); i++) {
-		QueueNode *node = new QueueNode();
-		node->content = logRecords[i];
-		auto r = rowQueues.find(logRecords[i]->key);
-		// Check if rowQueue already created or not
-		if(r != rowQueues.end()) {
-			auto isEmpty = r->second->isEmpty();
-			r->second->enq(node);
-			if(isEmpty) {
-				QueueNode *schedulerNode = new QueueNode();
-				schedulerNode->content = r->second;
-				schedulerQueue->enq(schedulerNode);
-			}
-		} else {
-			// New row-queue
-			LockFreeQueue *newRowQueue = new LockFreeQueue();
-			newRowQueue->enq(node);
-			// Add rowqueue to record->queue map
-			rowQueues.insert({logRecords[i]->key, newRowQueue});
-			// Add row-queue to scheduler queue
-			QueueNode *schedulerNode = new QueueNode();
-			schedulerNode->content = newRowQueue;
-			schedulerQueue->enq(schedulerNode);
+	vector<int> logRecordMap(DbSize, 0);
+	vector<LogSegment *> logSegments = *(vector<LogSegment *> *)arg;
+	for(int i = 0; i < logSegments.size(); i++) {
+		for(int j = 0; j < logSegments[i]->records.size(); j++) {
+			int key = logSegments[i]->records[j]->key;
+			logSegments[i]->records[j]->prev_timestamp.store(logRecordMap[key]);
+			logRecordMap[key] = logSegments[i]->records[j]->timestamp;
 		}
+		logSegments[i]->preprocessed.store(true);
+		segmentQueue->enq(i);
 	}
 	return NULL;
 }
@@ -535,11 +457,14 @@ snapshotter(void *arg) {
 			newN = std::min(newN, ci[i]);
 		}
 		Counter.store(n);
-		printf("Count: %u\n", Counter.load());
 		n.store(newN);
-		usleep(200000);
+		usleep(10000);
 	}
 	return NULL;
+}
+
+void update_local_counter(int *local, int timestamp) {
+	*local = timestamp - 1;
 }
 
 void *
@@ -553,21 +478,23 @@ worker(void *arg) {
 		5. If writeTS - 1 of current write is bigger than ci, update the local variable.
 	*/
 	int *ci = (int *)arg;
-	int localCount;
+	queue <LogRecord *> deferQueue;
 	while(Counter.load() < max_c - 1) {
-		QueueNode *dequeuedNode = schedulerQueue->deq();
-		if(dequeuedNode==NULL) continue;
-		LockFreeQueue *rowQueue = (LockFreeQueue *)dequeuedNode->content;
-		QueueNode *dequeuedRecord = rowQueue->deq();
-		if(dequeuedRecord==NULL) continue;
-		LogRecord *record = (LogRecord *)dequeuedRecord->content;
-		update(Root, record->key, record->newValue, record->timestamp);
-		localCount = record->timestamp - 1;
-		if(localCount > *ci) {
-			*ci = localCount;
+		int currentSegment = segmentQueue->deq();
+		if(currentSegment < 0) continue;
+		for(int i = 0; i < logSegments[currentSegment]->records.size(); i++) {
+			LogRecord * currentRecord = logSegments[currentSegment]->records[i];
+			update(Root, deferQueue, currentRecord);
+			if(deferQueue.empty()) {
+				update_local_counter(ci, currentRecord->timestamp);
+			}
 		}
-		if(rowQueue->isEmpty()) continue;
-		schedulerQueue->enq(dequeuedNode);
+		while(!deferQueue.empty()) {
+			LogRecord *deferredRecord = deferQueue.front();
+			update(Root, deferQueue, deferredRecord);
+			deferQueue.pop();
+			update_local_counter(ci, deferredRecord->timestamp);
+		}
 	}
 	return NULL;
 }
@@ -580,8 +507,8 @@ reader(void *arg){
 		2. Read most recent record version less than or equal to current snapshot
 	*/
 	while(!readOnlyQueue->isEmpty()) {
-		QueueNode *node = readOnlyQueue->deq();
-		Transaction *tx = (Transaction *)node->content;
+		int currentTx = readOnlyQueue->deq();
+		Transaction *tx = readOnlyTransactions[currentTx];
 		tx->ts = Counter.load();
 		for(int i = 0; i < tx_size; i++) {
 			search(Root, tx->readSet[i], tx->ts);
@@ -590,29 +517,36 @@ reader(void *arg){
 	return NULL;
 }
 
-void generate_log_records(vector<LogRecord *> &log) {
-	int txOrder = 1;
-	for(int i = 0; i < max_tx; i++) {
-		log[i] = (LogRecord *)malloc(sizeof(LogRecord));
-		log[i]->key = rand() % DbSize;
-		log[i]->newValue = rand();
-		log[i]->timestamp.store(txOrder);
-		if(i % tx_size == 0) {
-			txOrder++;
+void generate_log_records(void) {
+	
+	int txOrder = 0;
+	int t = 0;
+	for(int i = 0; i < logSegments.size(); i++) {
+		logSegments[i] = (LogSegment *)malloc(sizeof(LogSegment));
+		for(int j=0; j < 250; j++) {
+			if(t % tx_size == 0 || j == 0) {
+				txOrder++;
+			}
+			LogRecord *record = (LogRecord *)malloc(sizeof(LogRecord));
+			record->key = rand() % DbSize;
+			record->newValue = rand();
+			record->timestamp.store(txOrder);
+			logSegments[i]->records.push_back(record);
+			t++;
 		}
+		logSegments[i]->preprocessed.store(false);
 	}
 	max_c = txOrder;
 }
 
 void generate_read_only_tx() {
 	for(int i = 0; i < max_tx; i++) {
-		QueueNode *newQueueNode = (QueueNode *)malloc(sizeof(QueueNode));
 		Transaction *newReadOnlyTx = (Transaction *)malloc(sizeof(Transaction));
-		newQueueNode->content = newReadOnlyTx;
 		for(int j = 0; j < tx_size; j++) {
 			newReadOnlyTx->readSet[j] = rand() % DbSize;
 		}
-		readOnlyQueue->enq(newQueueNode);
+		readOnlyTransactions[i] = newReadOnlyTx;
+		readOnlyQueue->enq(i);
 	}
 }
 
@@ -640,15 +574,17 @@ main(int argc, char *argv[])
 	}
 
 	// Generate log of committed transactions to replicate (update only Txs)
-	vector<LogRecord *> log(max_tx, NULL);
-	generate_log_records(log);
+	generate_log_records();
 
 	// Generate incoming read only Tx
 	generate_read_only_tx();
 
 	// cout << "|------------ Beginning of Log ---------------|" << endl;
-	// for(int i = 0; i < max_tx; i++) {
-	// 	cout << log[i]->key << endl;
+	// for(int i = 0; i < logSegments.size(); i++) {
+	// 	for(int j = 0; j < logSegments[i]->records.size(); j++) {
+	// 		cout << logSegments[i]->records[j]->key << endl;
+	// 		cout << logSegments[i]->records[j]->timestamp << endl;
+	// 	}
 	// }
 	// cout << "|------------ End of Log ---------------------|" << endl;
 
@@ -657,14 +593,25 @@ main(int argc, char *argv[])
 	// for(int i = 0; i < thread_num; i++) {
 	// 	pthread_create(&thread[i], NULL, worker, (void *)NULL);
 	// }
-	pthread_create(&thread[0], NULL, scheduler, (void*)&log);
+
+	pthread_create(&thread[0], NULL, scheduler, (void*)&logSegments);
 	pthread_create(&thread[1], NULL, worker, (void*)&ci[0]);
 	pthread_create(&thread[2], NULL, snapshotter, (void*)NULL);
-	pthread_create(&thread[4], NULL, reader, (void *)NULL);
+	// pthread_create(&thread[4], NULL, reader, (void *)NULL);
 
-	for(int i = 0; i < thread_num; i++) {
-		pthread_join(thread[i], NULL);
-	}
+	// for(int i = 0; i < 2; i++) {
+	// 	pthread_join(thread[i], NULL);
+	// }
+
+	pthread_join(thread[0], NULL);
+	cout<< "scheduler finished" << endl;
+	pthread_join(thread[1], NULL);
+	cout<< "worker finished" << endl;
+	pthread_join(thread[2], NULL);
+	cout<< "snapshotter finished" << endl;
+
+	// scheduler((void *)&log);
+	// worker((void *)&ci[0]);
 
 	// printf("Successful transactions: %u \n", Counter.load());
 	// end = cur_time();

@@ -7,7 +7,10 @@
         "memory": "cpp",
         "tuple": "cpp",
         "variant": "cpp",
-        "atomic": "cpp"
+        "atomic": "cpp",
+        "ostream": "cpp",
+        "iostream": "cpp",
+        "vector": "cpp"
     },
     "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools"
 }
