@@ -7,17 +7,18 @@
 #include <cstdlib>
 #include <sys/time.h>
 
-#define DbSize 10000
+#define DbSize 1000000
 #define thread_num 64
 #define readers_num 30
 #define workers_num 32
 #define tx_size 16
 
-int max_tx = 1000;
+int max_tx = 1000000;
 int max_c = 0;
 std::atomic<int> Counter(0);
 std::atomic<int> n(0);
 int ci[workers_num];
+struct timeval begin, endWrite, endRead;
 
 struct timeval
 cur_time(void)
@@ -44,8 +45,8 @@ typedef struct transaction {
 	int ts;
 } Transaction;
 
-vector<LogSegment *> logSegments(400, NULL);
-vector<Transaction *> readOnlyTransactions(1000, NULL);
+vector<LogSegment *> logSegments(4000, NULL);
+vector<Transaction *> readOnlyTransactions(1000000, NULL);
 
 void
 print_tree_core(NODE *n)
@@ -498,6 +499,7 @@ worker(void *arg) {
 			update_local_counter(ci, deferredRecord->timestamp);
 		}
 	}
+	endWrite = cur_time();
 	return NULL;
 }
 
@@ -516,6 +518,7 @@ reader(void *arg){
 			search(Root, tx->readSet[i], tx->ts);
 		}
 	}
+	endRead = cur_time();
 	return NULL;
 }
 
@@ -526,7 +529,7 @@ void generate_log_records(void) {
 	for(int i = 0; i < logSegments.size(); i++) {
 		logSegments[i] = (LogSegment *)malloc(sizeof(LogSegment));
 		for(int j=0; j < 250; j++) {
-			if(t % tx_size == 0 || j == 0) {
+			if(t % (tx_size/2) == 0 || j == 0) {
 				txOrder++;
 			}
 			LogRecord *record = (LogRecord *)malloc(sizeof(LogRecord));
@@ -555,7 +558,6 @@ void generate_read_only_tx() {
 int
 main(int argc, char *argv[])
 {
-	struct timeval begin, end;
 	pthread_t thread[thread_num];
 
 	init_root();
@@ -571,7 +573,6 @@ main(int argc, char *argv[])
 		int rc = pthread_rwlock_init(&(record->rwlock), NULL);
 		if(rc==-1) ERR;
 		insert(k, record);
-		// print_tree(Root);
 		k++;
 	}
 
@@ -590,11 +591,7 @@ main(int argc, char *argv[])
 	// }
 	// cout << "|------------ End of Log ---------------------|" << endl;
 
-	// begin = cur_time();
-
-	// for(int i = 0; i < thread_num; i++) {
-	// 	pthread_create(&thread[i], NULL, worker, (void *)NULL);
-	// }
+	timeval begin = cur_time();
 
 	for(int i = 0; i < workers_num; i++) {
 		pthread_create(&thread[i], NULL, worker, (void*)&ci[i]);
@@ -608,8 +605,9 @@ main(int argc, char *argv[])
 	for(int i = 0; i < thread_num; i++) {
 		pthread_join(thread[i], NULL);
 	}
-	// printf("Successful transactions: %u \n", Counter.load());
-	// end = cur_time();
+
+	printf("Time to end write replication: %ld\n", endWrite.tv_sec - begin.tv_sec);
+	printf("Time to end read-only Tx: %ld\n", endRead.tv_sec - begin.tv_sec);
 
 	return 0;
 }
