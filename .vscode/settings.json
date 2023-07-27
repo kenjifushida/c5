@@ -12,5 +12,6 @@
         "iostream": "cpp",
         "vector": "cpp"
     },
-    "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools"
+    "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools",
+    "cmake.configureOnOpen": false
 }

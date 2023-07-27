@@ -15,7 +15,7 @@ typedef struct _DATA {
 	int key;
 	int val;
 	int timestamp;
-	pthread_rwlock_t rwlock;
+	// pthread_rwlock_t rwlock;
 	struct _DATA *next;
 } DATA;
 

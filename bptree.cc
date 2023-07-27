@@ -4,13 +4,14 @@
 #include <vector>
 #include <queue>
 #include <unordered_map>
+#include <atomic>
 #include <cstdlib>
 #include <sys/time.h>
 
-#define DbSize 1000000
-#define thread_num 64
-#define readers_num 30
-#define workers_num 32
+#define DbSize 100000
+#define thread_num 16
+#define readers_num 4
+#define workers_num 10
 #define tx_size 16
 
 int max_tx = 1000000;
@@ -37,7 +38,8 @@ typedef struct record {
 
 typedef struct segment {
 	std::atomic<bool> preprocessed;
-	vector<LogRecord *> records;
+	LogRecord * records[250];
+	int segmentSize;
 } LogSegment;
 
 typedef struct transaction {
@@ -45,7 +47,7 @@ typedef struct transaction {
 	int ts;
 } Transaction;
 
-vector<LogSegment *> logSegments(4000, NULL);
+vector<LogSegment *> logSegments(40000, NULL);
 vector<Transaction *> readOnlyTransactions(1000000, NULL);
 
 void
@@ -366,7 +368,7 @@ interactive()
 }
 
 // Read operation
-void
+int
 search(NODE *node, int key, int txTimestamp)
 {
 	int i;
@@ -378,23 +380,22 @@ search(NODE *node, int key, int txTimestamp)
 			while(record && record->timestamp > txTimestamp) {
 				record = record->next;
 			}
-			if(pthread_rwlock_tryrdlock(&(record->rwlock))==0) {
-				printf("Read lock acquired\n");
+			// if(pthread_rwlock_tryrdlock(&(record->rwlock))==0) {
 				int readVal = record->val;
-				printf("val: %d\n", readVal);
-				if(pthread_rwlock_unlock(&(record->rwlock))!=0) ERR;
-				return;
-			}
-			printf("Read lock acquistion failed\n");
-			throw (-1);
+				// printf("val: %d\n", readVal);
+				// if(pthread_rwlock_unlock(&(record->rwlock))!=0) ERR;
+				return readVal;
+			// }
+			// printf("Read lock acquistion failed\n");
+			// throw (-1);
 		}
 	}
 	printf("Key %d not found\n", key);
-	return;
+	return -1;
 }
 
-void
-update(NODE *node, queue<LogRecord *> &deferQueue, LogRecord *updateRecord)
+bool
+update(NODE *node, LogRecord *updateRecord)
 {
 	int i;
 	NODE *leaf = find_leaf(node, updateRecord->key);
@@ -406,17 +407,16 @@ update(NODE *node, queue<LogRecord *> &deferQueue, LogRecord *updateRecord)
 			newVersion->key = updateRecord->key;
 			newVersion->val = updateRecord->newValue;
 			newVersion->timestamp = updateRecord->timestamp;
-			pthread_rwlock_init(&newVersion->rwlock, NULL);
+			// pthread_rwlock_init(&newVersion->rwlock, NULL);
 			if(record->timestamp == updateRecord->prev_timestamp) {
-				cout << "record updated = " << "key: " << newVersion->key << "neWVal: " << newVersion->val << "ts: " << newVersion->timestamp << endl;
+				// cout << "record updated = " << "key: " << newVersion->key << "neWVal: " << newVersion->val << "ts: " << newVersion->timestamp << endl;
 				leaf->chi[i] = (NODE *)newVersion;
-				return;
+				return true;
 			}
 		}
 	}
-	cout << "record deferred = " << "key: " << updateRecord->key << "neWVal: " << updateRecord->newValue << "ts: " << updateRecord->timestamp << endl;
-	deferQueue.push(updateRecord);
-	return;
+	// cout << "record deferred = " << "key: " << updateRecord->key << "neWVal: " << updateRecord->newValue << "ts: " << updateRecord->timestamp << endl;
+	return false;
 }
 
 NODE *
@@ -439,8 +439,8 @@ scheduler(void *arg) {
 	*/
 	vector<int> logRecordMap(DbSize, 0);
 	vector<LogSegment *> logSegments = *(vector<LogSegment *> *)arg;
-	for(int i = 0; i < logSegments.size(); i++) {
-		for(int j = 0; j < logSegments[i]->records.size(); j++) {
+	for(long unsigned int i = 0; i < logSegments.size(); i++) {
+		for(int j = 0; j < logSegments[i]->segmentSize; j++) {
 			int key = logSegments[i]->records[j]->key;
 			logSegments[i]->records[j]->prev_timestamp.store(logRecordMap[key]);
 			logRecordMap[key] = logSegments[i]->records[j]->timestamp;
@@ -460,6 +460,7 @@ snapshotter(void *arg) {
 			newN = std::min(newN, ci[i]);
 		}
 		Counter.store(n);
+		// cout << "C: " << Counter.load() << endl;
 		n.store(newN);
 		usleep(10000);
 	}
@@ -484,21 +485,34 @@ worker(void *arg) {
 	queue <LogRecord *> deferQueue;
 	while(Counter.load() < max_c - 1) {
 		int currentSegment = segmentQueue->deq();
-		if(currentSegment < 0) continue;
-		for(int i = 0; i < logSegments[currentSegment]->records.size(); i++) {
+		if(currentSegment < 0) {
+			if(logSegments[logSegments.size()-1]->preprocessed.load()) {
+				break;
+			}
+			continue;
+		}
+		int segmentSize = logSegments[currentSegment]->segmentSize;
+		for(int i = 0; i < segmentSize; i++) {
 			LogRecord * currentRecord = logSegments[currentSegment]->records[i];
-			update(Root, deferQueue, currentRecord);
+			if(!update(Root, currentRecord)) {
+				deferQueue.push(currentRecord);
+			};
 			if(deferQueue.empty()) {
 				update_local_counter(ci, currentRecord->timestamp);
 			}
 		}
+		// Check defer queue for any available writes
 		while(!deferQueue.empty()) {
 			LogRecord *deferredRecord = deferQueue.front();
-			update(Root, deferQueue, deferredRecord);
-			deferQueue.pop();
-			update_local_counter(ci, deferredRecord->timestamp);
+			if(update(Root, deferredRecord)) {
+				deferQueue.pop();
+				update_local_counter(ci, deferredRecord->timestamp);
+			}
 		}
+		// If all deferred writes are completed, update counter to end of current segment
+		update_local_counter(ci, logSegments[currentSegment]->records[segmentSize-1]->timestamp);
 	}
+	update_local_counter(ci, logSegments[logSegments.size()-1]->records[249]->timestamp);
 	endWrite = cur_time();
 	return NULL;
 }
@@ -515,7 +529,7 @@ reader(void *arg){
 		Transaction *tx = readOnlyTransactions[currentTx];
 		tx->ts = Counter.load();
 		for(int i = 0; i < tx_size; i++) {
-			search(Root, tx->readSet[i], tx->ts);
+			int val = search(Root, tx->readSet[i], tx->ts);
 		}
 	}
 	endRead = cur_time();
@@ -526,8 +540,8 @@ void generate_log_records(void) {
 	
 	int txOrder = 0;
 	int t = 0;
-	for(int i = 0; i < logSegments.size(); i++) {
-		logSegments[i] = (LogSegment *)malloc(sizeof(LogSegment));
+	for(long unsigned int i = 0; i < logSegments.size(); i++) {
+		LogSegment *newSegment = (LogSegment *)malloc(sizeof(LogSegment));
 		for(int j=0; j < 250; j++) {
 			if(t % (tx_size/2) == 0 || j == 0) {
 				txOrder++;
@@ -536,10 +550,12 @@ void generate_log_records(void) {
 			record->key = rand() % DbSize;
 			record->newValue = rand();
 			record->timestamp.store(txOrder);
-			logSegments[i]->records.push_back(record);
+			newSegment->records[j]= record;
 			t++;
 		}
-		logSegments[i]->preprocessed.store(false);
+		newSegment->segmentSize = 250;
+		newSegment->preprocessed.store(false);
+		logSegments[i] = newSegment;
 	}
 	max_c = txOrder;
 }
@@ -570,14 +586,15 @@ main(int argc, char *argv[])
 		record->key = k;
 		record->val = 0;
 		record->timestamp = 0;
-		int rc = pthread_rwlock_init(&(record->rwlock), NULL);
-		if(rc==-1) ERR;
+		// int rc = pthread_rwlock_init(&(record->rwlock), NULL);
+		// if(rc==-1) ERR;
 		insert(k, record);
 		k++;
 	}
 
 	// Generate log of committed transactions to replicate (update only Txs)
 	generate_log_records();
+	cout << "max c: " << max_c << endl;
 
 	// Generate incoming read only Tx
 	generate_read_only_tx();
@@ -606,8 +623,8 @@ main(int argc, char *argv[])
 		pthread_join(thread[i], NULL);
 	}
 
-	printf("Time to end write replication: %ld\n", endWrite.tv_sec - begin.tv_sec);
-	printf("Time to end read-only Tx: %ld\n", endRead.tv_sec - begin.tv_sec);
+	cout << "Time for write replication: " << (endWrite.tv_sec * 1000000 + endWrite.tv_usec) - (begin.tv_sec * 1000000 + begin.tv_usec) << endl;
+	cout << "Time for read only tx: " << (endRead.tv_sec * 1000000 + endRead.tv_usec) - (begin.tv_sec * 1000000 + begin.tv_usec) << endl;
 
 	return 0;
 }
